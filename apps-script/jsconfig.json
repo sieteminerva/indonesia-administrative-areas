@@ -1,0 +1,13 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "allowJs": true,
+    "checkJs": false,
+    "types": ["google-apps-script"],
+    "lib": ["ESNext", "DOM"],
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": ["*.js"],
+  "exclude": ["library", "client", "**/*.html"]
+}

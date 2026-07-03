@@ -1,0 +1,27 @@
+<script>
+const setPlaceholderText = (element, text) => {
+  element.innerHTML = "";
+  element && element.tagName === "INPUT" ? element.placeholder = text : element.textContent = text;
+  return element;
+};
+function __setloadingState(el, level, state = "loading", placeholderEl = null) {
+  if (state === "start") {
+    el.classList.add("loading");
+    setPlaceholderText(placeholderEl, `Loading ${level}...`);
+  } else if (state === "complete") {
+    el.classList.remove("error");
+    el.classList.remove("loading");
+    const text = level === "kodepos" ? "Isi kodepos tujuan" : `Pilih ${level}`;
+    setPlaceholderText(placeholderEl, text);
+  } else {
+    el.classList.remove("loading");
+  }
+  return;
+}
+function __setErrorState(el, level, message, placeholderEl = null) {
+  el.classList.remove("loading");
+  el.classList.add("error");
+  setPlaceholderText(placeholderEl, `Terjadi kesalahan saat memuat ${level}`);
+}
+
+</script>

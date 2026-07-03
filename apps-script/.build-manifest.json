@@ -1,0 +1,12 @@
+[
+  "library/id-address-builder.js",
+  "library/input-builder.semantic-ui.js",
+  "library/input-builder.native.js",
+  "library/id-address-adapter.semantic-ui.js",
+  "client/script.js",
+  "library/id-address-adapter.base.js",
+  "library/id-address-adapter.native.js",
+  "library/helper.js",
+  "library/id-address-adapter.js",
+  "client/styles.css"
+]

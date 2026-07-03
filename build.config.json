@@ -1,0 +1,38 @@
+{
+  "name": "library",
+  "minify": false,
+  "comments": false,
+  "preserveModules": true,
+  "format": "es",
+  "htmlOutput": true,
+  "singleFileOutput": false,
+  "files": [
+    {
+      "src": "src/id-address-builder.js",
+      "dist": "apps-script/library"
+    },
+    {
+      "src": "src/input-builder.semantic-ui.js",
+      "dist": "apps-script/library",
+      "library": false
+    },
+    {
+      "src": "src/input-builder.native.js",
+      "dist": "apps-script/library",
+      "library": false
+    },
+    {
+      "src": "src/id-address-adapter.semantic-ui.js",
+      "dist": "apps-script/library"
+    },
+    {
+      "src": "src/styles.css",
+      "dist": "apps-script/client"
+    },
+    {
+      "src": "src/script.js",
+      "dist": "apps-script/client",
+      "library": false
+    }
+  ]
+}

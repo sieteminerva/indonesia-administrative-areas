@@ -1,0 +1,79 @@
+<script>
+const IAddressAdapterSemanticUi = {
+  init(el) {
+    console.info("IAddressBuilder Semantic UI Adapter Initialized");
+    if (el.__isDropdown) {
+      $(el.parentElement).dropdown();
+    }
+  },
+  setOptions(el, args = {}) {
+    const level = el.dataset.level;
+    const { options = [], state = "complete", onLevelChange } = args;
+    if (onLevelChange) {
+      el.__onLevelChange = onLevelChange;
+    }
+    const wrapper = el.parentElement;
+    $(wrapper).dropdown("destroy");
+    const placeholderEl = el.__isDropdown ? wrapper.querySelector(".default.text") : el;
+    __setloadingState(wrapper, level, state, placeholderEl);
+    if (options && !el.__isDropdown && state === "complete") {
+      el["value"] = options[0][`${level}_name`];
+      return;
+    }
+    const values = options.map((o) => ({
+      name: o[`${level}_name`],
+      value: o[`${level}_id`]
+    }));
+    $(wrapper).dropdown({
+      values,
+      onChange: (value, text, $selectedItem) => {
+        const selected = {
+          [`${level}_id`]: value,
+          [`${level}_name`]: text
+        };
+        el.__onLevelChange?.(el.value === "" ? null : selected);
+      }
+    });
+  },
+  setSelectedOption(el, value) {
+    el.dataset.level;
+    $(el.parentElement).dropdown("set selected", value);
+  },
+  onLevelChange(el, callback) {
+    const level = el.dataset.level;
+    $(el.parentElement).dropdown({
+      onChange: (value, text, $selectedItem) => {
+        const selected = {
+          [`${level}_id`]: value,
+          [`${level}_name`]: text
+        };
+        el.__onLevelChange?.(selected);
+      }
+    });
+  },
+  onError(el, message) {
+    const level = el.dataset.level;
+    const wrapper = el.parentElement;
+    wrapper.classList.add("error");
+    $(wrapper).dropdown("destroy");
+    const placeholderEl = el.parentElement.querySelector(".text") ?? el;
+    __setErrorState(el, level, message, placeholderEl);
+  },
+  getValue(el) {
+    return $(el.parentElement).dropdown("get value");
+  },
+  clear(el) {
+    const wrapper = el.parentElement;
+    $(wrapper).dropdown("clear");
+    el["value"] = "";
+    $(wrapper).dropdown("change values", []);
+    wrapper.classList.remove("loading");
+  },
+  destroy(el) {
+    if ($(el.parentElement).dropdown) {
+      $(el.parentElement).dropdown("destroy");
+    }
+  }
+};
+
+</script>

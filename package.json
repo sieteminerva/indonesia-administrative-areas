@@ -1,0 +1,60 @@
+{
+  "name": "indonesia-administrative-areas",
+  "version": "1.0.0",
+  "description": "Google Apps Script Projects create REST API to get Indonesia Administrative Areas, also UI library for Cascade Administrative Area Level Selection included.",
+  "keywords": [
+    "Google",
+    "Apps",
+    "Script",
+    "GAS",
+    "REST",
+    "API",
+    "Spreadsheet",
+    "UI",
+    "Cascade Selection",
+    "Administrative Areas",
+    "Indonesia"
+  ],
+  "license": "MIT",
+  "author": "YMGH",
+  "type": "module",
+  "module": "./dist/library/index.js",
+  "exports": {
+    ".": {
+      "import": "./dist/library/index.js"
+    },
+    "./styles.css": "./dist/library/styles.css",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist/library",
+    "README.MD",
+    "BUILD.MD"
+  ],
+  "sideEffects": [
+    "*.css"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run build:lib && npm run build:gas && npm run build:public",
+    "build:lib": "vite build --mode lib",
+    "build:gas": "vite build --mode gas && npm run build:gas:include",
+    "build:gas:include": "node include.postbuild.js",
+    "gas:push": "node gas-push.js",
+    "build:public": "vite build --mode public",
+    "preview": "vite preview",
+    "prepare": "npm run build:lib"
+  },
+  "devDependencies": {
+    "@rollup/plugin-inject": "^5.0.5",
+    "@types/google-apps-script": "^1.0.100",
+    "dotenv": "^16.4.5",
+    "terser": "^5.44.1",
+    "vite-plugin-singlefile": "^2.3.0"
+  },
+  "dependencies": {
+    "fomantic-ui-css": "^2.9.4",
+    "jquery": "^3.7.1",
+    "vite": "^7.2.4"
+  }
+}

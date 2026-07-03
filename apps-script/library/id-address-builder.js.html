@@ -1,0 +1,1221 @@
+<script>
+const ADDRESS_LEVELS = ["propinsi", "kota", "kecamatan", "kelurahan", "kodepos"];
+const ADDRESS_DETAIL_KEYS = [
+  ...ADDRESS_LEVELS.flatMap((level) => [`${level}_id`, `${level}_name`]),
+  "latitude",
+  "longitude",
+  "formatted_address"
+];
+const DEFAULT_CONFIG = {
+  url: null,
+  geocode: false,
+  cache: {
+    enabled: true,
+    ttlDays: 1,
+    prefix: "IdAddressBuilder",
+    delay: 1e3,
+    timeout: 1e4
+  },
+  container: null,
+  useAdapter: null,
+  headless: false,
+  textContent: {
+    loading: "Loading #{level}...",
+    placeholder: "Pilih #{level}",
+    notFound: "Tidak menemukan hasil",
+    error: "Terjadi kesalahan"
+  }
+};
+class IdAddressBuilder {
+  /**
+   * @typedef {Function} IdAddressEventHandler
+   * @param {Object|null} schema - The schema object for the level that triggered the event.
+   * @param {Object|Array} data - Event payload data.
+   * @param {Function} complete - Callback that resolves the current event state.
+   * @param {Object} rest - Additional event metadata.
+   * @returns {void}
+   */
+  /**
+   * @typedef {Object} IdAddressEventArgs
+   * @property {Object|null} [schema=null] - Schema object associated with the event.
+   * @property {Object|Array} [data={}] - Payload passed to listeners.
+   * @property {string} [state="start"] - Current lifecycle state for the event.
+   * @property {Function} [complete] - Callback that returns the final lifecycle state.
+   * @property {Function} [onLevelChange]
+   */
+  /**
+   * @typedef {Object} IdAddressCacheEntry
+   * @property {*} data - The API response payload to cache.
+   * @property {number} expire - The absolute expiration timestamp for this cache entry.
+   */
+  /**
+   * @typedef {Object} IdAddressConfig
+   * @property {string} url - The base API endpoint URL (required).
+   * @property {boolean} [geocode=false] - Whether to enable geolocation lookups.
+   * @property {IdAddressCacheConfig} [cache] - Cache settings including ttlDays, prefix, and delay.
+   * @property {HTMLElement|string} container - The DOM element or selector to host the inputs (required).
+   * @property {string} [useAdapter=native] - The name of the UI adapter to use (e.g., 'native', 'semantic-ui').
+   * @property {boolean} [headless=false] - If true, operates without DOM elements.
+   * @property {IdAddressTextContentConfig} [textContent] - Text content for the input or dropdown (loading, placeholder, notFound, error).
+   *
+   */
+  /**
+   * @typedef {Object} IdAddressTextContentConfig
+   * @property {string} [loading] - Text shown when loading the options
+   * @property {string} [placeholder] - Placeholder text
+   * @property {string} [notFound] - Text shown when nothing found
+   * @property {string} [error] - Text shown when error happend
+   *
+   */
+  /**
+   * @typedef {Object} IdAddressCacheConfig
+   * @property {boolean} [enabled] - Whether to enable caching the response.
+   * @property {number} [ttlDays] - expiration time (in day).
+   * @property {string} [prefix] - prefix key for data storing in localStorage
+   * @property {number} [delay] - delay time
+   * @property {number} [timeout] - timeout
+   *
+   */
+  /**
+   * @property {IdAddressConfig} _config
+   * @description Merged runtime configuration for API, cache, text, container, and adapter behavior.
+   */
+  _config;
+  /**
+   * @property {Object<string, import("./id-address-adapter").IAddressAdapter>} adapters
+   * @description Registry of available UI adapters by adapter name.
+   */
+  adapters;
+  /**
+   * @property {boolean} _destroyed
+   * @description Whether this instance has been destroyed and should ignore async work.
+   */
+  _destroyed;
+  /**
+   * @property {boolean} _initialized
+   * @description Whether this instance has already completed initialization.
+   */
+  _initialized;
+  /**
+   * @property {Set<AbortController>} _abortControllers
+   * @description Active request controllers used to cancel pending API calls.
+   */
+  _abortControllers;
+  /**
+   * @property {HTMLElement|null} containerEl
+   * @description Resolved container element that hosts the address controls.
+   */
+  containerEl;
+  /**
+   * @property {Object} _detail
+   * @description Current accumulated address detail selected or resolved by the builder.
+   */
+  _detail;
+  /**
+   * @property {Array<Object>} schema
+   * @description Runtime schema entries for each configured address level.
+   */
+  schema;
+  /**
+   * @property {Object<string, Array<IdAddressEventHandler>>} _listeners
+   * @description Event listeners grouped by event name.
+   */
+  _listeners;
+  /**
+   * @property {boolean} _skipChangeListener
+   * @description Guard flag used while programmatically updating selected values.
+   */
+  _skipChangeListener;
+  /**
+   * @property {Array<string>} _levelOrder
+   * @description Ordered administrative levels used to build and traverse the cascade.
+   */
+  _levelOrder;
+  /**
+   * Initializes a new instance of IdAddressBuilder with the provided configuration.
+   *
+   * @param {IdAddressConfig} [config={}] - Configuration object for the builder.
+   * @throws {Error} If the container is not provided in the configuration.
+   *
+   * @example
+   * const picker = new IdAddressBuilder({ url: 'https://api.example.com', container: '#address-form' });
+   *
+   * @description
+   * How it works: The constructor merges user configuration with defaults, registers the built-in
+   * adapters (base and native), initializes internal state tracking (detail, schema, listeners),
+   * and triggers an immediate cache validation check to ensure stored data is fresh.
+   */
+  constructor(config) {
+    this._config = {
+      ...DEFAULT_CONFIG,
+      ...config,
+      cache: { ...DEFAULT_CONFIG.cache, ...config?.cache },
+      textContent: { ...DEFAULT_CONFIG.textContent, ...config?.textContent }
+    };
+    this.adapters = {
+      // by default only register base & native adapter
+      base: IAddressAdapterBase,
+      native: IAddressAdapterNative
+    };
+    this._destroyed = false;
+    this._initialized = false;
+    this._abortControllers = /* @__PURE__ */ new Set();
+    this.containerEl = null;
+    this._detail = {};
+    this.schema = [];
+    this._listeners = {};
+    this._skipChangeListener = false;
+    if (!this.config.container) {
+      throw new Error("[IdAddressBuilder] container is required");
+    }
+    this._levelOrder = [...ADDRESS_LEVELS];
+    this._validateCache();
+  }
+  /**
+   * Registers a new UI adapter to handle element manipulation and event binding.
+   *
+   * @param {string} name - The unique identifier for the adapter (e.g., 'semantic-ui').
+   * @param {import("./id-address-adapter").IAddressAdapter} adapter - An object implementing the adapter interface.
+   * @returns {void}
+   * @throws {TypeError} If the name is invalid, adapter is not an object, or required methods are missing.
+   *
+   * @example
+   * picker.registerAdapter('my-theme', {
+   *   setOptions: (el, config) => { ... },
+   *   setSelectedOption: (el, val) => { ... },
+   *   onLevelChange: (el) => { ... },
+   *   clear: (el) => { ... }
+   * });
+   *
+   * @description
+   * This method validates the provided adapter object against a set of required methods
+   * defined in the `IAddressAdapter` interface. If valid, it stores the adapter in the
+   * `adapters` registry, making it available for use during initialization via the `useAdapter` config.
+   */
+  registerAdapter(name, adapter) {
+    const requiredMethods = ["setOptions", "setSelectedOption", "onLevelChange", "clear"];
+    if (!name || typeof name !== "string") {
+      throw new TypeError("[IdAddressBuilder] adapter name must be a non-empty string");
+    }
+    if (!adapter || typeof adapter !== "object") {
+      throw new TypeError(`[IdAddressBuilder] adapter '${name}' must be an object`);
+    }
+    const missingMethods = requiredMethods.filter((method) => typeof adapter[method] !== "function");
+    if (missingMethods.length) {
+      throw new TypeError(
+        `[IdAddressBuilder] adapter '${name}' is missing required method(s): ${missingMethods.join(", ")}`
+      );
+    }
+    this.adapters[name] = adapter;
+  }
+  /**
+   * Retrieves the current configuration object for the builder.
+   *
+   * @returns {IdAddressConfig} The merged configuration settings.
+   *
+   * @example
+   * const currentUrl = picker.config.url;
+   *
+   * @description
+   * This getter provides access to the internal `_config` object, which contains
+   * API settings, cache parameters, and UI preferences.
+   */
+  get config() {
+    return this._config;
+  }
+  /**
+   * Updates the builder configuration by merging new settings with the existing ones.
+   *
+   * @param {IdAddressConfig} _config - An object containing configuration overrides.
+   *
+   * @example
+   * picker.config = { geocode: true };
+   *
+   * @description
+   * This setter merges the provided object into the internal `_config` state while
+   * preserving nested defaults for cache and text content settings.
+   */
+  set config(_config) {
+    this._config = {
+      ...this._config,
+      ..._config,
+      cache: { ...this._config.cache, ..._config?.cache },
+      textContent: { ...this._config.textContent, ..._config?.textContent }
+    };
+  }
+  /**
+   * Initializes the address builder by mapping DOM elements to the internal schema,
+   * setting up adapters, and triggering the initial data load.
+   *
+   * @returns {void}
+   * @throws {Error} If the API URL is missing, container is invalid, or a specified adapter is not found.
+   *
+   * @example
+   * const picker = new IdAddressBuilder({ url: '...', container: '#form' });
+   * picker.init();
+   *
+   * @description
+   * This method performs the core setup: it validates configuration, identifies target
+   * DOM nodes (or creates virtual ones for headless mode), initializes UI adapters
+   * for each level, links levels into a cascade chain, and starts the root data fetch.
+   */
+  init() {
+    if (this._initialized) {
+      console.warn("IdAddressBuilder already initialized.");
+      return;
+    }
+    this._initialized = true;
+    this._destroyed = false;
+    console.log("IdAddressBuilder initialized.");
+    let containerEl = null;
+    if (!this.config.url) {
+      throw new Error("[IdAddressBuilder] url is required");
+    }
+    if (typeof this.config.container === "string") {
+      containerEl = document.querySelector(this.config.container);
+    } else if (this.config.container instanceof HTMLElement) {
+      containerEl = this.config.container;
+    } else {
+      throw new Error("Invalid Type Container");
+    }
+    if (!containerEl) {
+      throw new Error("[IdAddressBuilder] container not found");
+    }
+    this.containerEl = containerEl;
+    let nodes = [];
+    if (!this.config.headless) {
+      nodes = [...containerEl.querySelectorAll("[data-level]")];
+    } else {
+      this.config.useAdapter = "base";
+      nodes = this._levelOrder.map((level) => ({
+        dataset: {
+          level
+        },
+        __virtual: true
+      }));
+    }
+    this.schema = nodes.map((el, index) => {
+      const adapterName = this.config.useAdapter;
+      const adapter = this.adapters[adapterName] ?? (this.config.headless ? this.adapters.base : this.adapters.native);
+      if (!adapter) throw new Error(`[Adapter '${adapterName}' not found]`);
+      const name = el.dataset.level;
+      const isDropdown = name === "kodepos" ? false : true;
+      el.__isDropdown = isDropdown;
+      adapter.init?.(el, name);
+      adapter.onLevelChange?.(el);
+      const schemaRef = {
+        el,
+        name,
+        adapterName,
+        adapter,
+        isDropdown,
+        getDetail: () => this.detail,
+        next: null,
+        index,
+        load: (parentId = null, selectedValue = null) => {
+          return this._loadLevel(schemaRef, parentId, selectedValue);
+        },
+        select: async () => {
+        }
+      };
+      return schemaRef;
+    });
+    this.schema.forEach((schema, i) => {
+      schema.next = this.schema[i + 1] ?? null;
+    });
+    this._bindInternalEvents();
+    this._loadLevel(this.schema[0], null, null).catch((e) => {
+      this._throwError(this.schema[0], "Error loading root level:", e);
+    });
+    const kodeposSchema = this.schema.find((s) => s.name === "kodepos");
+    if (kodeposSchema) this._bindKodeposInputListener(kodeposSchema);
+  }
+  /**
+   * Tears down the instance by aborting network requests, removing event listeners,
+   * and cleaning up DOM references to prevent memory leaks.
+   *
+   * @returns {void}
+   *
+   * @example
+   * const picker = new IdAddressBuilder({ ... });
+   * picker.init();
+   * // later...
+   * picker.destroy();
+   *
+   * @description
+   * This method performs a comprehensive cleanup: it flags the instance as destroyed,
+   * aborts all pending fetch requests via AbortControllers, iterates through the
+   * schema to remove DOM event listeners (including custom kodepos handlers),
+   * invokes adapter-specific destroy logic, and resets internal state variables.
+   */
+  destroy() {
+    if (this._destroyed) return;
+    console.log("Destroying IdAddressBuilder...");
+    this._destroyed = true;
+    this._initialized = false;
+    for (const controller of this._abortControllers) {
+      try {
+        controller.abort();
+      } catch (err) {
+        console.warn("Abort failed:", err);
+      }
+    }
+    this._abortControllers.clear();
+    for (const schema of this.schema) {
+      try {
+        const { el, adapter } = schema;
+        if (el?.__kodeposHandler) {
+          el.removeEventListener("change", el.__kodeposHandler);
+          delete el.__kodeposHandler;
+        }
+        delete el.__onLevelChange;
+        delete el.__isDropdown;
+        adapter?.destroy?.(el, schema);
+      } catch (err) {
+        console.error(`Destroy failed for schema '${schema?.name}':`, err);
+      }
+    }
+    this.schema = [];
+    this._listeners = {};
+    this._detail = {};
+    this.containerEl = null;
+    console.log("IdAddressBuilder destroyed.");
+  }
+  /**
+   * Binds a change listener to the postal code (kodepos) input field to handle
+   * manual entry and trigger reverse-lookup of administrative levels.
+   *
+   * @param {Object} schema - The schema reference object for the 'kodepos' level.
+   * @returns {void}
+   *
+   * @example
+   * const kodeposSchema = picker.schema.find(s => s.name === 'kodepos');
+   * picker._bindKodeposInputListener(kodeposSchema);
+   *
+   * @description
+   * This method attaches an asynchronous 'change' event listener to the kodepos element.
+   * When a user enters a postal code, it clears previous errors, updates the internal
+   * detail state, fetches the full administrative hierarchy (Propinsi to Kelurahan)
+   * associated with that code, and triggers a cascading update of all UI dropdowns.
+   */
+  _bindKodeposInputListener(schema) {
+    const { el, name: level } = schema;
+    if (!this.config.headless) {
+      el.removeEventListener("change", el.__kodeposHandler);
+      el.__kodeposHandler = async (e) => {
+        if (this._skipChangeListener) return;
+        const inputHasError = el.parentElement?.querySelector(".error");
+        if (inputHasError) inputHasError.classList.remove("error");
+        const kodeposValue = e.target.value;
+        if (!kodeposValue) return;
+        const kodepos = { [`${level}_name`]: Number(kodeposValue) };
+        this._setDetail(kodepos, true);
+        this.__emitChange("onLevelChanged", {
+          schema,
+          data: kodepos,
+          state: "complete"
+        });
+        try {
+          const detail = await this.getDetailByKodepos(kodeposValue, this.config.geocode);
+          if (!detail || !detail[0]) {
+            throw new Error("Kodepos not found");
+          }
+          this._setDetail({ [`${level}_id`]: detail[0][`${level}_id`] });
+          if (this.config.geocode) {
+            this.__emitChange("onGeocodeLoaded", { schema, data: detail[0], state: "complete" });
+          }
+          await this._updateLevelsByKodepos(detail[0]);
+        } catch (error) {
+          this._throwError(
+            schema,
+            "Failed lookup detail from kodepos",
+            error instanceof Error ? error : new Error(String(error))
+          );
+        }
+      };
+      el.addEventListener("change", el.__kodeposHandler);
+    }
+  }
+  /**
+   * Recursively loads administrative data for a specific level, handles UI state transitions,
+   * and manages cascading updates between parent and child levels.
+   *
+   * @param {Object} levelSchema - The schema reference object for the level to be loaded.
+   * @param {number|string|null} [parentId=null] - The ID of the parent level used to filter results.
+   * @param {number|null} [selectedValue=null] - An optional ID to automatically select after loading.
+   * @returns {Promise<void>} A promise that resolves when the level and its immediate UI state are updated.
+   * @throws {Error} If data fetching fails or if a required parent ID is missing for non-root levels.
+   *
+   * @example
+   * const kotaSchema = picker.schema.find(s => s.name === 'kota');
+   * await picker._loadLevel(kotaSchema, 11); // Loads cities for Propinsi ID 11
+   *
+   * @description
+   * This method manages the lifecycle of a level load: it triggers "start" events for UI loaders,
+   * fetches data from the API or cache, handles empty states, and defines the `onLevelChange`
+   * logic that allows child levels to react when this level's value changes.
+   */
+  async _loadLevel(levelSchema, parentId = null, selectedValue = null) {
+    if (this._destroyed) return;
+    if (!levelSchema) return;
+    const level = levelSchema.name;
+    if (level !== "propinsi" && !parentId && selectedValue == null) {
+      return;
+    }
+    this.__emitChange("onLevelLoaded", {
+      schema: levelSchema,
+      data: [],
+      state: "start",
+      complete: (s = "start") => s
+    });
+    let options = [];
+    try {
+      options = await this.getRegionalData({ level, parentId });
+      if (this._destroyed) return;
+      if (!options) throw new Error(`Failed to fetch ${level}`);
+      if (level === "kodepos") {
+        this.__emitChange("onLevelChanged", {
+          schema: levelSchema,
+          data: { ...options[0] },
+          state: "complete",
+          complete: () => "complete"
+        });
+      }
+    } catch (error) {
+      this._throwError(levelSchema, `Failed to fetch ${level}:`, error instanceof Error ? error : new Error(String(error)));
+      return;
+    }
+    if (!options || options.length === 0) {
+      this.__emitChange("onLevelLoaded", {
+        schema: levelSchema,
+        data: [],
+        state: "empty",
+        complete: () => "empty",
+        onLevelChange: null
+      });
+      return;
+    }
+    const onLevelChangeFn = async (selectedParent) => {
+      try {
+        if (!selectedParent) {
+          this.clearNextLevel(level, true);
+          this.__emitChange("onLevelChanged", {
+            schema: levelSchema,
+            data: {},
+            state: "complete",
+            complete: () => "complete"
+          });
+          return;
+        }
+        if (!this._skipChangeListener) {
+          this.clearNextLevel(level);
+          this.__emitChange("onLevelChanged", {
+            schema: levelSchema,
+            data: { ...selectedParent },
+            state: "complete",
+            complete: () => "complete"
+          });
+          await this._loadLevel(levelSchema.next, selectedParent[level + "_id"]);
+          if (levelSchema.next.name === "kodepos" && this.config.geocode) {
+            const geo = await this.getGeocodeLocation(levelSchema.getDetail());
+            if (this._destroyed) return;
+            this.__emitChange("onGeocodeLoaded", { schema: levelSchema, data: geo, state: "complete" });
+          }
+        }
+      } catch (error) {
+        this._throwError(
+          levelSchema,
+          "Error during cascade onChange",
+          error instanceof Error ? error : new Error(String(error))
+        );
+      }
+    };
+    levelSchema.select = onLevelChangeFn;
+    this.__emitChange("onLevelLoaded", {
+      schema: levelSchema,
+      data: options,
+      state: "complete",
+      complete: () => "complete",
+      onLevelChange: onLevelChangeFn
+    });
+    if (selectedValue != null) {
+      this.__emitChange("onLevelChanged", {
+        schema: levelSchema,
+        data: { [`${level}_id`]: selectedValue },
+        state: "complete",
+        complete: () => "complete"
+      });
+    }
+  }
+  /**
+   * Synchronizes all administrative dropdowns based on a provided detail object,
+   * typically used for reverse-filling the form from a postal code lookup.
+   *
+   * @param {Object} detail - An object containing the full administrative hierarchy (IDs and names).
+   * @returns {Promise<void>} A promise that resolves when all levels have been updated.
+   *
+   * @example
+   * const detail = await picker.getDetailByKodepos('12345');
+   * await picker._updateLevelsByKodepos(detail[0]);
+   *
+   * @description
+   * This method iterates through the schema levels, identifies the correct parent IDs
+   * from the detail object, and triggers a silent load for each level. It uses a
+   * `_skipChangeListener` flag to prevent the standard cascading logic from
+   * interfering with the manual synchronization process.
+   */
+  async _updateLevelsByKodepos(detail = {}) {
+    this._skipChangeListener = true;
+    try {
+      for (const schemaItem of this.schema) {
+        const level = schemaItem.name;
+        let selectedValue = detail[level + "_id"];
+        if (!selectedValue) continue;
+        if (schemaItem.isDropdown) {
+          const parentLevel = this._getRelatedLevel(level, false);
+          const parentId = detail[parentLevel + "_id"];
+          try {
+            this._setDetail({
+              [level + "_id"]: detail[level + "_id"],
+              [level + "_name"]: detail[level + "_name"]
+            });
+            await this._loadLevel(schemaItem, parentId, selectedValue);
+          } catch (error) {
+            this._throwError(
+              schemaItem,
+              "Error during reverse-fill by kodepos",
+              error instanceof Error ? error : new Error(String(error))
+            );
+          } finally {
+            selectedValue = null;
+          }
+        }
+      }
+    } finally {
+      this._skipChangeListener = false;
+    }
+  }
+  /**
+   * Handles error reporting by logging to the console and delegating UI state
+   * updates to the appropriate adapter.
+   *
+   * @param {Object} schema - The schema reference object for the level where the error occurred.
+   * @param {string} message - A descriptive error message.
+   * @param {Error|null} [error=null] - The original error object, if available.
+   * @returns {void}
+   *
+   * @example
+   * picker._throwError(kotaSchema, "Failed to load cities", new Error("Network Timeout"));
+   *
+   * @description
+   * This method centralizes error handling. It logs a formatted error to the console,
+   * then attempts to call the `onError` method of the level's UI adapter to show
+   * visual feedback. If the adapter fails or doesn't implement the method, it
+   * applies a fallback CSS class to the element.
+   */
+  _throwError(schema, message, error = null) {
+    console.error(`[${schema?.name ?? "unknown"}] ❌`, message, error);
+    if (!schema) return;
+    const { el, adapter } = schema;
+    if (adapter?.onError) {
+      try {
+        adapter.onError(el, message);
+        return;
+      } catch (err) {
+        console.warn("adapter.onError failed:", err);
+      }
+    }
+    el.classList.add("error");
+  }
+  /**
+   * Clears the values and UI states of all administrative levels following a specified level.
+   *
+   * @param {string} level - The name of the level from which to start clearing (e.g., 'propinsi').
+   * @param {boolean} [refresh=false] - If true, also clears the data for the current level itself.
+   * @returns {void}
+   *
+   * @example
+   * // Clears Kota, Kecamatan, Kelurahan, and Kodepos when Propinsi changes
+   * picker.clearNextLevel('propinsi');
+   *
+   * @description
+   * This method manages the reset logic for the cascading dropdowns. It identifies the starting
+   * point in the schema, optionally nullifies the current level's data, and then iterates
+   * through all subsequent levels to reset their internal state and trigger the UI
+   * adapter's `clear` method to update the DOM.
+   */
+  clearNextLevel(level, refresh = false) {
+    const schema = this.schema.find((s) => s.name === level);
+    if (refresh) this._setDetail({ [`${level}_id`]: null, [`${level}_name`]: null });
+    let nextLevelSchema = schema.next;
+    if (this._skipChangeListener) return;
+    while (nextLevelSchema) {
+      this._setDetail({ [`${nextLevelSchema.name}_id`]: null, [`${nextLevelSchema.name}_name`]: null });
+      nextLevelSchema.adapter.clear?.(nextLevelSchema.el);
+      nextLevelSchema = nextLevelSchema.next;
+    }
+  }
+  // Public access API especially for headless usage
+  async loadNextLevel(level, parentId, selectedValue = null) {
+    const schema = this.schema.find((s) => s.name === level);
+    if (!schema) {
+      throw new Error(`Level '${level}' not found`);
+    }
+    return this._loadLevel(schema, parentId, selectedValue);
+  }
+  // ============================
+  // 📬 DATA FETCHERS
+  // ============================
+  /**
+   * Retrieves administrative regional data either from the local cache or by calling the remote API.
+   *
+   * @param {Object} [query={}] - The query parameters for the data request.
+   * @param {string} query.level - The administrative level to fetch (e.g., 'propinsi', 'kota', 'detail').
+   * @param {string|number} [query.parentId] - The ID of the parent region to filter results.
+   * @param {string} [query.kodepos] - Postal code for specific detail lookups.
+   * @param {boolean} [query.location] - Flag to include geocode data in detail lookups.
+   * @returns {Promise<Array|Object>} A promise that resolves to the requested regional data.
+   * @throws {Error} If the API request fails or cache retrieval encounters a critical error.
+   *
+   * @example
+   * const cities = await picker.getRegionalData({ level: 'kota', parentId: 11 });
+   *
+   * @description
+   * This method acts as a data proxy. It generates a unique cache key based on the query parameters,
+   * checks if valid data exists in `localStorage`, and if not, performs a network fetch.
+   * To ensure a consistent UI experience, it introduces a configurable artificial delay
+   * when serving data from the cache.
+   */
+  async getRegionalData(query) {
+    const { level, parentId } = query;
+    const parentLevel = this._getRelatedLevel(level, false);
+    const key = level === "detail" ? "detail" : parentLevel ? parentLevel : level;
+    let suffix = query.kodepos ? query.kodepos : parentId ? parentId : "root";
+    suffix = level === "detail" && query.location ? suffix + "-geo" : suffix;
+    const cacheKey = `${key}-${suffix}`;
+    let isLocal = false;
+    let data = null;
+    if (this.config.cache.enabled) {
+      const cached = this._loadCache(cacheKey);
+      if (cached) {
+        isLocal = true;
+        data = cached;
+      }
+    }
+    if (!data) {
+      isLocal = false;
+      data = await this._fetchAPI(query);
+      if (this.config.cache.enabled && level) {
+        this._writeCache(cacheKey, data);
+      }
+    }
+    return new Promise((resolve, reject) => {
+      try {
+        if (isLocal) {
+          setTimeout(() => {
+            resolve(data);
+          }, this.config.cache.delay);
+        } else {
+          resolve(data);
+        }
+        console.log(`[${level}] Data loaded from ${isLocal ? "cache" : "API"}:`, data);
+      } catch (error) {
+        localStorage.removeItem(`${this.config.cache.prefix}:${cacheKey}`);
+        reject(error);
+      }
+    });
+  }
+  /**
+   * Fetches comprehensive administrative details and optional geolocation data
+   * based on a specific postal code.
+   *
+   * @param {string|number} kodepos - The postal code to look up.
+   * @param {boolean} [location=false] - Whether to include latitude and longitude in the response.
+   * @returns {Promise<Array<Object>>} A promise that resolves to an array containing the address hierarchy.
+   * @throws {Error} If the network request fails or the postal code is not found.
+   *
+   * @example
+   * const details = await picker.getDetailByKodepos('12345', true);
+   * console.log(details[0].propinsi_name); // "DKI Jakarta"
+   *
+   * @description
+   * This method serves as a high-level wrapper around `getRegionalData`. It specifically
+   * requests the 'detail' level, which triggers the API to return the full
+   * administrative chain (Province down to Kelurahan) associated with the provided
+   * postal code, rather than just a list of options for a single level.
+   */
+  async getDetailByKodepos(kodepos, location = false) {
+    const data = await this.getRegionalData({ level: "detail", kodepos: String(kodepos), location });
+    return data;
+  }
+  /**
+   * Fetches geographic coordinates (latitude and longitude) for a specific address hierarchy.
+   *
+   * @param {Object} [detail={}] - An object containing administrative names (propinsi_name, kota_name, etc.).
+   * @returns {Promise<Object>} A promise that resolves to an object containing geocode data.
+   * @throws {Error} If the API request fails or the network times out.
+   *
+   * @example
+   * const detail = picker.detail;
+   * const geo = await picker.getGeocodeLocation(detail);
+   * console.log(geo.latitude, geo.longitude);
+   *
+   * @description
+   * This method maps the internal address detail state to a set of query parameters
+   * required by the geocoding service. It performs a network fetch via the central
+   * `_fetchAPI` method using the 'geocode' level, which triggers the backend to
+   * resolve the text-based address into spatial coordinates.
+   */
+  async getGeocodeLocation(detail = {}) {
+    const params = {
+      kodepos: detail.kodepos_name,
+      kelurahan: detail.kelurahan_name,
+      kecamatan: detail.kecamatan_name,
+      kota: detail.kota_name,
+      propinsi: detail.propinsi_name
+    };
+    const data = await this._fetchAPI({ level: "geocode", ...params });
+    return data;
+  }
+  /**
+   * Retrieves the current administrative detail state, filtering out null values.
+   *
+   * @returns {Object} An object containing the current address details (IDs and names).
+   *
+   * @example
+   * const currentAddress = picker.detail;
+   * console.log(currentAddress.propinsi_name);
+   *
+   * @description
+   * How it works: The getter iterates through the internal `_detail` object. It uses
+   * `Object.hasOwn` to ensure only instance properties are processed, and it
+   * deletes any keys that have a value of `null` to provide a clean, active state
+   * representation of the selected address.
+   */
+  get detail() {
+    for (const key in this._detail) {
+      if (!Object.hasOwn(this._detail, key)) continue;
+      if (this._detail[key] === null) {
+        delete this._detail[key];
+      }
+    }
+    return this._detail;
+  }
+  /**
+   * Updates the internal address detail state with new values, optionally resetting the state first.
+   *
+   * @param {Object} value - An object containing address detail keys (e.g., propinsi_id, kota_name).
+   * @param {boolean} [refresh=false] - If true, clears the existing detail state before merging the new value.
+   * @returns {void}
+   * @throws {TypeError} If the provided value fails the `_isIAddressDetail` validation.
+   *
+   * @example
+   * builder._setDetail({ propinsi_id: 31, propinsi_name: 'DKI Jakarta' });
+   * builder._setDetail({ kodepos_name: 12345 }, true); // Resets other fields
+   *
+   * @description
+   * This method serves as the central state manager for the selected address. It validates the
+   * input against a strict schema of allowed keys and types, handles the merging of new data
+   * into the existing `_detail` object, and supports a "refresh" mode to start with a clean slate.
+   */
+  _setDetail(value, refresh = false) {
+    if (!_isIAddressDetail(value)) {
+      throw new TypeError("Invalid value: expected an IAddressDetail-like object");
+    }
+    if (refresh) {
+      this._detail = {};
+    }
+    this._detail = { ...this.detail, ...value };
+  }
+  /**
+   * Performs a network request to the configured API endpoint with automatic timeout and abort handling.
+   *
+   * @param {Object} [query={}] - Key-value pairs to be appended as URL search parameters.
+   * @param {RequestInit} [options={}] - Standard fetch options (method, headers, etc.).
+   * @param {number} [timeout=10000] - Maximum time in milliseconds to wait before aborting the request.
+   * @returns {Promise<any>} A promise that resolves to the 'data' property of the successful JSON response.
+   * @throws {Error} If the request times out, returns a non-2xx status, or the JSON payload indicates failure.
+   *
+   * @example
+   * const data = await picker._fetchAPI({ level: 'propinsi' });
+   *
+   * @description
+   * This method wraps the native `fetch` API with a lifecycle management system. It creates an
+   * `AbortController` for every request, registers it in an internal set for cleanup during
+   * instance destruction, and sets a timer to trigger an abort if the server doesn't respond
+   * within the specified window. It also normalizes the API response format.
+   */
+  async _fetchAPI(query = {}, options = {}, timeout = 1e4) {
+    if (this._destroyed) return;
+    const controller = new AbortController();
+    this._abortControllers.add(controller);
+    const id = setTimeout(() => controller.abort(), this.config.cache.timeout ?? timeout);
+    const baseUrl = this.config.url.replace(/\/+$/, "");
+    const params = new URLSearchParams();
+    for (const [k, v] of Object.entries(query)) {
+      if (v !== void 0 && v !== null) params.append(k, v);
+    }
+    const url = params.toString() ? `${baseUrl}?${params.toString()}` : baseUrl;
+    console.log(`[Query]:`, query);
+    console.log(`[Endpoint]:`, url);
+    try {
+      const res = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(id);
+      if (res.status >= 400 && res.status < 600) {
+        this._abortControllers.delete(controller);
+        throw new Error(res.statusText);
+      }
+      const json = await res.json();
+      if (json && json.success) {
+        this._abortControllers.delete(controller);
+        return json.data;
+      }
+      throw new Error(json?.message || "Invalid response");
+    } catch (err) {
+      console.error("❌ getRegionalData", err);
+      clearTimeout(id);
+      if (err instanceof Error && err.name === "AbortError") {
+        console.error("Fetch request timed out.");
+        this._abortControllers.delete(controller);
+        throw new Error("Request timed out");
+      }
+      this._abortControllers.delete(controller);
+      throw err;
+    }
+  }
+  /**
+   * Retrieves the name of the administrative level immediately preceding or following a given level.
+   *
+   * @param {string} level - The reference level name (e.g., 'kota').
+   * @param {boolean} [next=true] - If true, returns the child level; if false, returns the parent level.
+   * @returns {string|null} The name of the related level, or null if the boundary is reached or level is invalid.
+   *
+   * @example
+   * const parent = builder._getRelatedLevel('kota', false); // returns 'propinsi'
+   * const child = builder._getRelatedLevel('kota', true);   // returns 'kecamatan'
+   *
+   * @description
+   * How it works: The method looks up the index of the provided level within the `_levelOrder` array.
+   * It then calculates the target index by adding or subtracting 1 based on the `next` flag.
+   * Finally, it returns the value at that index if it falls within the array bounds.
+   */
+  _getRelatedLevel(level, next = true) {
+    const index = this._levelOrder.indexOf(level);
+    const targetIndex = index + (next ? 1 : -1);
+    const isValid = index >= 0 && targetIndex >= 0 && targetIndex < this._levelOrder.length;
+    return isValid ? this._levelOrder[targetIndex] : null;
+  }
+  // ============================
+  // ⚡ EVENT SYSTEM
+  // ============================
+  /**
+   * Binds internal event listeners to the builder's event system to coordinate
+   * communication between the data logic and UI adapters.
+   *
+   * @returns {void}
+   *
+   * @example
+   * this._bindInternalEvents();
+   *
+   * @description
+   * This method sets up the core reactive loop of the builder. It listens for
+   * `onLevelLoaded` to trigger UI updates (populating dropdowns) and
+   * `onLevelChanged` to synchronize the internal state and handle programmatic
+   * selection updates across different adapters.
+   */
+  _bindInternalEvents() {
+    this.__on("onLevelLoaded", (schema, data, complete, rest) => {
+      if (this._destroyed) return;
+      try {
+        const { el, adapter } = schema;
+        const onLevelChange = rest?.onLevelChange;
+        adapter.setOptions?.(el, {
+          options: data,
+          state: complete(),
+          onLevelChange
+        });
+      } catch (err) {
+        console.error("onLevelLoaded handler failed:", err);
+      }
+    });
+    this.__on("onLevelChanged", (schema, data) => {
+      if (this._destroyed) return;
+      try {
+        const { el, adapter, name: level } = schema;
+        if (!this._skipChangeListener) {
+          this._setDetail(data);
+        }
+        if (data?.[`${level}_id`] && el.__isDropdown) {
+          adapter.setSelectedOption?.(el, data[`${level}_id`]);
+        }
+      } catch (err) {
+        console.error("onLevelChanged handler failed:", err);
+      }
+    });
+  }
+  /**
+   * Registers an event handler in the builder's internal listener registry.
+   *
+   * @param {string} event - Internal event name to subscribe to.
+   * @param {IdAddressEventHandler} handler - Callback invoked when the event is emitted.
+   * @returns {void} Does not return a value; it stores the handler in `_listeners`.
+   * @throws {void} This method does not throw; invalid handlers will fail later when emitted.
+   *
+   * @example
+   * builder.__on('onLevelLoaded', (schema, data, complete) => {
+   *   console.log(schema.name, complete(), data);
+   * });
+   *
+   * @description
+   * How it works: the method creates an array for the event name if one does not exist,
+   * then appends the callback so `__emitChange` can call it later.
+   */
+  __on(event, handler) {
+    if (!this._listeners[event]) this._listeners[event] = [];
+    this._listeners[event].push(handler);
+  }
+  /**
+   * Emits one internal builder event to all registered listeners.
+   *
+   * @param {string} event - Internal event name to emit.
+   * @param {IdAddressEventArgs} [args={}] - Event payload and lifecycle metadata.
+   * @returns {void} Does not return a value; listeners receive the normalized event arguments.
+   * @throws {void} Listener errors are caught and logged so one failing callback does not stop the rest.
+   *
+   * @example
+   * builder.__emitChange('onLevelChanged', {
+   *   schema: builder.schema[0],
+   *   data: { propinsi_id: 31 },
+   *   state: 'complete',
+   * });
+   *
+   * @description
+   * How it works: the method normalizes event arguments, looks up all registered
+   * listeners for the event, and invokes each listener with protected error handling.
+   */
+  __emitChange(event, args = {}) {
+    const { schema = null, data = {}, state = "start", complete = (status = state) => status, ...rest } = args || {};
+    const listeners = this._listeners?.[event];
+    if (!listeners || !listeners.length) return;
+    for (const fn of listeners) {
+      try {
+        fn(schema, data, complete, rest);
+      } catch (err) {
+        console.error(`[IdAddressBuilder:_emit] Listener error on '${event}':`, err);
+      }
+    }
+  }
+  /**
+   * Emits both a level-specific change event and the shared `onLevelChanged` event.
+   *
+   * @param {string} level - Administrative level name used to build the level-specific event.
+   * @param {IdAddressEventArgs} fn - Event payload used for both emitted change events.
+   * @returns {void} Does not return a value; it emits events and synchronizes detail state.
+   * @throws {TypeError} May throw if `fn.data` is not a valid address detail object.
+   *
+   * @example
+   * builder.__emitLevelChange('propinsi', {
+   *   schema: builder.schema[0],
+   *   data: { propinsi_id: 31, propinsi_name: 'DKI Jakarta' },
+   *   state: 'complete',
+   * });
+   *
+   * @description
+   * How it works: the method first emits `<level>Changed` for targeted subscribers,
+   * then emits the generic `onLevelChanged` event, and finally merges the payload
+   * data into the builder detail state.
+   */
+  __emitLevelChange(level, fn) {
+    this.__emitChange(`${level}Changed`, fn);
+    this.__emitChange(`onLevelChanged`, fn);
+    this._setDetail(fn?.data);
+  }
+  // Public registration methods
+  /**
+   * Registers a callback that runs when a level finishes loading options or enters a loading state.
+   *
+   * @param {IdAddressEventHandler} fn - Listener invoked with the loaded level schema, data, state resolver, and metadata.
+   * @returns {void} Does not return a value; it registers the listener.
+   *
+   * @example
+   * builder.onLevelLoaded((schema, data, complete) => {
+   *   console.log(`${schema.name}: ${complete()}`, data);
+   * });
+   *
+   * @description
+   * This is the public subscription helper for the internal `onLevelLoaded` event.
+   */
+  onLevelLoaded(fn) {
+    this.__on("onLevelLoaded", fn);
+  }
+  /**
+   * Registers a callback that runs after an administrative level selection changes.
+   *
+   * @param {IdAddressEventHandler} fn - Listener invoked with the changed level schema and selected data.
+   * @returns {void} Does not return a value; it registers the listener.
+   *
+   * @example
+   * builder.onLevelChanged((schema, data) => {
+   *   console.log(schema.name, data);
+   * });
+   *
+   * @description
+   * This is the public subscription helper for the internal `onLevelChanged` event.
+   */
+  onLevelChanged(fn) {
+    this.__on("onLevelChanged", fn);
+  }
+  /**
+   * Registers a callback that runs when geocode data has been loaded.
+   *
+   * @param {IdAddressEventHandler} fn - Listener invoked with the active schema and geocode payload.
+   * @returns {void} Does not return a value; it registers the listener.
+   *
+   * @example
+   * builder.onGeocodeLoaded((schema, data) => {
+   *   console.log(data.latitude, data.longitude);
+   * });
+   *
+   * @description
+   * This is the public subscription helper for the internal `onGeocodeLoaded` event.
+   */
+  onGeocodeLoaded(fn) {
+    this.__on("onGeocodeLoaded", fn);
+  }
+  // ============================
+  // 💾 CACHING HELPERS
+  // ============================
+  /**
+   * Checks whether the builder cache is still valid and clears expired entries when needed.
+   *
+   * @param {boolean} [clearNow=false] - Forces cache clearing even when the stored expiration is still valid.
+   * @returns {void} Does not return a value; it updates `localStorage` cache metadata as a side effect.
+   * @throws {void} Storage errors are caught and logged instead of being thrown.
+   *
+   * @example
+   * const builder = new IdAddressBuilder({ url: '/api/address', container: '#address-form' });
+   * builder._validateCache(true); // Force all IdAddressBuilder cache entries to be refreshed.
+   *
+   * @description
+   * How it works: the method reads the cache expiration marker, exits early when the marker
+   * is still in the future, otherwise removes every `localStorage` item using the configured
+   * cache prefix and writes a new expiration timestamp based on `cache.ttlDays`.
+   */
+  _validateCache(clearNow = false) {
+    if (!this.config.cache.enabled) return;
+    try {
+      const expiredTimeKey = `${this.config.cache.prefix}:expired-time`;
+      const storedExpiredTime = localStorage.getItem(expiredTimeKey);
+      const now = Date.now();
+      if (!clearNow && storedExpiredTime) {
+        const parsedExpiredTime = parseInt(storedExpiredTime, 10);
+        if (parsedExpiredTime > now) {
+          console.info(`Cache still valid.`);
+          return;
+        }
+      }
+      for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key?.startsWith(this.config.cache.prefix + ":")) {
+          localStorage.removeItem(key);
+        }
+      }
+      const ttl = this.config.cache.ttlDays * 24 * 3600 * 1e3;
+      localStorage.setItem(expiredTimeKey, (now + ttl).toString());
+      console.info(`Cache cleared and new expiration set.`);
+    } catch (error) {
+      console.warn("Cache clear failed", error);
+    }
+  }
+  /**
+   * Writes one API response payload into the configured `localStorage` cache namespace.
+   *
+   * @param {string} key - Cache key suffix, without the configured prefix.
+   * @param {*} data - Serializable data to store in the cache entry.
+   * @returns {void} Does not return a value; it persists the cache entry in `localStorage`.
+   * @throws {Error} Throws `Cache write failed` when serialization or storage fails.
+   *
+   * @example
+   * builder._writeCache('propinsi-root', [{ propinsi_id: 31, propinsi_name: 'DKI Jakarta' }]);
+   *
+   * @description
+   * How it works: the method computes an absolute expiration time from `cache.ttlDays`,
+   * wraps the payload and expiration in a cache entry object, serializes it to JSON,
+   * and stores it under `<prefix>:<key>`.
+   */
+  _writeCache(key, data) {
+    try {
+      const ttl = this.config.cache.ttlDays * 24 * 3600 * 1e3;
+      const obj = { data, expire: Date.now() + ttl };
+      localStorage.setItem(`${this.config.cache.prefix}:${key}`, JSON.stringify(obj));
+    } catch (error) {
+      throw new Error("Cache write failed", { cause: error });
+    }
+  }
+  /**
+   * Reads one cached API response payload from the configured `localStorage` cache namespace.
+   *
+   * @param {string} key - Cache key suffix, without the configured prefix.
+   * @returns {*|null} Returns cached data when present, otherwise `null`.
+   * @throws {void} Read and parse errors are caught and logged instead of being thrown.
+   *
+   * @example
+   * const cachedCities = builder._loadCache('propinsi-31');
+   * if (cachedCities) {
+   *   console.log(cachedCities.length);
+   * }
+   *
+   * @description
+   * How it works: the method builds the namespaced cache key, reads the raw JSON string
+   * from `localStorage`, parses it into a cache entry, removes stale or invalid entries,
+   * and returns only the stored `data` payload.
+   */
+  _loadCache(key) {
+    try {
+      const raw = localStorage.getItem(`${this.config.cache.prefix}:${key}`);
+      if (!raw) return null;
+      const obj = JSON.parse(raw);
+      if (!obj || typeof obj.expire !== "number" || obj.expire <= Date.now()) {
+        localStorage.removeItem(`${this.config.cache.prefix}:${key}`);
+        return null;
+      }
+      return obj.data;
+    } catch (error) {
+      console.warn("Cache load failed", error);
+      localStorage.removeItem(`${this.config.cache.prefix}:${key}`);
+      return null;
+    }
+  }
+}
+function _isIAddressDetail(obj) {
+  if (typeof obj !== "object" || obj === null) return false;
+  const invalidKeys = Object.keys(obj).filter((k) => !ADDRESS_DETAIL_KEYS.includes(k));
+  if (invalidKeys.length) {
+    console.error("Invalid keys:", invalidKeys, typeof invalidKeys);
+    return false;
+  }
+  const invalidTypes = Object.entries(obj).filter(([key, value]) => !isValidAddressDetailValue(key, value));
+  if (invalidTypes.length) {
+    console.error("Invalid value types:", invalidTypes);
+    return false;
+  }
+  return true;
+}
+function isValidAddressDetailValue(key, value) {
+  if (value === null || value === void 0) return true;
+  if (key.endsWith("_id")) {
+    return typeof value === "number" || typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value));
+  }
+  if (key.endsWith("_name")) {
+    return typeof value === "string" || key === "kodepos_name" && typeof value === "number";
+  }
+  if (key === "latitude" || key === "longitude") {
+    return typeof value === "number" || typeof value === "string" && value.trim() !== "" && !Number.isNaN(Number(value));
+  }
+  if (key === "formatted_address") {
+    return typeof value === "string";
+  }
+  return false;
+}
+
+</script>
